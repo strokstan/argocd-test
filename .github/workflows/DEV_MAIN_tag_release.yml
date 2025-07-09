@@ -17,7 +17,7 @@ on:
 
 jobs:
   tag-release:
-    uses: .github/workflows/_provision_release_tag.yml
+    uses: ./.github/workflows/_provision_release_tag.yml
     permissions: ### https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions-for-the-github_token
       pull-requests: write
       contents: write
