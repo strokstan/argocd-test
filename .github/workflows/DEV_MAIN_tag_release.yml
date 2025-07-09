@@ -17,12 +17,12 @@ on:
 
 jobs:
   tag-release:
-    uses: .github/workflows/_provision_release_tag.yml
+    uses: ./.github/workflows/_provision_release_tag.yml
     permissions: ### https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions-for-the-github_token
       pull-requests: write
       contents: write
       issues: write
-    if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref == 'develop'
+    # if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref == 'develop'
     with:
       label-map: '{"label": "SUFFIX"}' # Can be used for suffix mapping, e.g. '{"application": "APP", "label": "SUFFIX"}'
     secrets:
