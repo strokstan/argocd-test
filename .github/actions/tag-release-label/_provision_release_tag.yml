@@ -1,0 +1,83 @@
+name: Release provision
+
+on:
+  workflow_call:
+    secrets:
+      token:
+        required: true
+
+permissions: ### https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions-for-the-github_token
+  pull-requests: write
+  contents: write
+  issues: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get latest release
+        id: get_release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const latest = await github.rest.repos.getLatestRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo
+            });
+
+            const tag = latest.data.tag_name.replace('');
+            const [major, minor, patch] = tag.split('.').map(n => parseInt(n));
+            core.setOutput('major', major);
+            core.setOutput('minor', minor);
+            core.setOutput('patch', patch);
+            core.setOutput('current', tag);
+
+      - name: Get PR label
+        id: label
+        run: |
+          LABELS=$(curl -s -H "Authorization: token ${{ secrets.token }}" \
+            "${{ github.event.pull_request.issue_url }}/labels" | jq -r '.[].name')
+
+          for label in $LABELS; do
+            if [[ "$label" == "major" || "$label" == "minor" || "$label" == "patch" ]]; then
+              echo "label=$label" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          done
+
+          echo "❌ No valid release label found (major, minor, patch)."
+          exit 1
+
+      - name: Calculate next version
+        id: version
+        run: |
+          major=${{ steps.get_release.outputs.major }}
+          minor=${{ steps.get_release.outputs.minor }}
+          patch=${{ steps.get_release.outputs.patch }}
+          label=${{ steps.label.outputs.label }}
+
+          if [[ "$label" == "major" ]]; then
+            new_version="$((major + 1)).0.0"
+          elif [[ "$label" == "minor" ]]; then
+            new_version="$major.$((minor + 1)).0"
+          elif [[ "$label" == "patch" ]]; then
+            new_version="$major.$minor.$((patch + 1))"
+          else
+            echo "❌ Unknown label: $label"
+            exit 1
+          fi
+
+          echo "new_version=$new_version" >> $GITHUB_OUTPUT
+          echo "✅ Next version: $new_version"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+            tag_name: ${{ steps.version.outputs.new_version }}
+            name: Release ${{ steps.version.outputs.new_version }}
+            body: |
+              Automatic release for PR #${{ github.event.pull_request.number }}
+              Based on label: ${{ steps.label.outputs.label }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.token }}

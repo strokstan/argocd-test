@@ -1,0 +1,157 @@
+name: Release provision
+
+on:
+  workflow_call:
+    inputs:
+      label-map:
+        description: "JSON string of label-to-suffix mapping"
+        required: true
+        type: string
+    secrets:
+      token:
+        required: true
+
+permissions: ### https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions-for-the-github_token
+  pull-requests: write
+  contents: write
+  issues: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get latest release
+        id: get_release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              // Initialize default version
+              let major = 0, minor = 0, patch = 0;
+              let tagName = '0.0.0';
+              
+              try {
+                // Attempt to get latest release
+                const latest = await github.rest.repos.getLatestRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo
+                });
+                
+                tagName = latest.data.tag_name;
+                
+                // Try to extract version numbers
+                const versionMatch = tagName.match(/(\d+)\.(\d+)\.(\d+)/);
+                if (versionMatch) {
+                  major = parseInt(versionMatch[1]);
+                  minor = parseInt(versionMatch[2]);
+                  patch = parseInt(versionMatch[3]);
+                } else {
+                  core.warning(`Could not extract version from tag: ${tagName}. Using 0.0.0 as fallback.`);
+                }
+              } catch (error) {
+                if (error.status === 404) {
+                  core.notice('No releases found - starting with 0.0.0');
+                } else {
+                  throw error; // Re-throw unexpected errors
+                }
+              }
+              
+              core.setOutput('major', major);
+              core.setOutput('minor', minor);
+              core.setOutput('patch', patch);
+              core.setOutput('current', `${major}.${minor}.${patch}`);
+              core.setOutput('full_tag', tagName);
+              
+            } catch (error) {
+              core.setFailed(`Unexpected error: ${error.message}`);
+            }
+
+      - name: Get PR tag version label
+        id: label
+        run: |
+          LABELS=$(curl -s -H "Authorization: token ${{ secrets.token }}" \
+            "${{ github.event.pull_request.issue_url }}/labels" | jq -r '.[].name')
+
+          for label in $LABELS; do
+            if [[ "$label" == "major" || "$label" == "minor" || "$label" == "patch" ]]; then
+              echo "label=$label" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          done
+
+          echo "❌ No valid release label found (major, minor, patch)."
+          exit 1
+
+      - name: Get suffix labels
+        id: get-suffix-labels
+        uses: actions/github-script@v7
+        with:
+          result-encoding: string
+          script: |
+            const labels = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+            });
+            return labels.data.map(label => label.name).join(',');
+    
+      - name: Generate suffix from labels
+        id: suffix
+        env:
+          SFX_MAP: ${{ inputs.label-map }}  # Pass the JSON map as an env variable
+        run: |
+          # Convert SFX_MAP (JSON) to a Bash associative array
+          declare -A label_map
+          while IFS="=" read -r key value; do
+            label_map["${key,,}"]="$value"  # Store lowercase keys
+          done < <(jq -r 'to_entries[] | "\(.key)=\(.value)"' <<< "$SFX_MAP")
+      
+          suffix=""
+          IFS=',' read -ra LABELS <<< "${{ steps.get-suffix-labels.outputs.result }}"
+          for label in "${LABELS[@]}"; do
+            key="${label,,}"  # Lowercase the label for case-insensitive matching
+            if [[ -v label_map[$key] ]]; then  # Check if the key exists
+              suffix+="-${label_map[$key]}"
+            fi
+          done
+      
+          echo "### ✅ The suffix will be added: $suffix" >> $GITHUB_STEP_SUMMARY
+          echo "suffix=$suffix" >> $GITHUB_OUTPUT
+    
+      - name: Calculate next version
+        id: version
+        env:
+          MAJOR: ${{ steps.get_release.outputs.major }}
+          MINOR: ${{ steps.get_release.outputs.minor }}
+          PATCH: ${{ steps.get_release.outputs.patch }}
+          LABEL: ${{ steps.label.outputs.label }}
+        run: |
+          if [[ "$LABEL" == "major" ]]; then
+            NEW_VERSION="$((MAJOR + 1)).0.0"
+          elif [[ "$LABEL" == "minor" ]]; then
+            NEW_VERSION="$MAJOR.$((MINOR + 1)).0"
+          elif [[ "$LABEL" == "patch" ]]; then
+            NEW_VERSION="$MAJOR.$MINOR.$((PATCH + 1))"
+          else
+            echo "❌ Unknown label: $LABEL"
+            exit 1
+          fi
+
+          echo "NEW_VERSION=$NEW_VERSION${{ steps.suffix.outputs.suffix }}" >> $GITHUB_OUTPUT
+          echo "✅ Next version: $NEW_VERSION"
+          echo "### ✅ Next version: $NEW_VERSION :rocket:" >> $GITHUB_STEP_SUMMARY
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.token }}
+        with:
+            generate_release_notes: true
+            tag_name: ${{ steps.version.outputs.new_version }}
+            name: Release ${{ steps.version.outputs.new_version }}
+            body: |
+              Automatic release for PR #${{ github.event.pull_request.number }}
+              Based on label: ${{ steps.label.outputs.label }}
+
+
